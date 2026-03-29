@@ -69,8 +69,8 @@ class TestBasicAllocation:
         assert len(result["allocation_trace"]) == 2
         for entry in result["allocation_trace"]:
             assert "subtask_id" in entry
-            assert "candidates" in entry
-            assert "scores" in entry
+            assert "robot_candidates" in entry
+            assert "robot_scores" in entry
 
 
 class TestHardConstraints:

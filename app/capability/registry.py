@@ -56,6 +56,9 @@ class CapabilityRegistry:
         # Kept in memory so register_entity can override payload defaults
         # with previously learned values.
         self._persisted_proficiency: dict[tuple[str, str], float] = {}
+        # Cached entity-only subgraph (entity/device/channel/capability nodes).
+        # None means the cache is stale and must be rebuilt on next access.
+        self._entity_subgraph: HyperGraph | None = None
 
     # ------------------------------------------------------------------
     # Robot registration
@@ -141,6 +144,7 @@ class CapabilityRegistry:
                 },
             ))
 
+        self._invalidate_entity_subgraph()
         logger.debug("Registered robot %s with %d capabilities", eid, len(caps))
 
     # ------------------------------------------------------------------
@@ -233,6 +237,7 @@ class CapabilityRegistry:
 
         # Derive effective capabilities from available channels
         self._resolver.resolve_and_apply(self._graph, eid)
+        self._invalidate_entity_subgraph()
         logger.info(
             "Registered human %s with %d devices",
             eid, len(human_data.get("devices", [])),
@@ -277,6 +282,7 @@ class CapabilityRegistry:
 
         if changed:
             self._resolver.resolve_and_apply(self._graph, entity_id)
+            self._invalidate_entity_subgraph()
 
     # ------------------------------------------------------------------
     # Proficiency & cognitive profile updates (used by learner / rules)
@@ -316,6 +322,7 @@ class CapabilityRegistry:
             if edge and edge.kind == "has_capability":
                 edge.weight = prof
                 applied += 1
+        self._invalidate_entity_subgraph()
         logger.info(
             "[Registry] load_persisted_proficiency: %d persisted, %d applied to existing edges",
             len(self._persisted_proficiency), applied,
@@ -343,6 +350,7 @@ class CapabilityRegistry:
             edge.attrs.setdefault("proficiency_history", []).append({
                 "value": old, "updated_at": _time.time(),
             })
+            self._invalidate_entity_subgraph()
             logger.info(
                 "[Registry] proficiency updated: %s/%s  %.3f → %.3f",
                 entity_id, canonical, old, edge.weight,
@@ -371,6 +379,7 @@ class CapabilityRegistry:
                 if v is not None:
                     node.attrs[k] = v
             logger.info("[Registry] cognitive profile updated: %s  %s", entity_id, updates)
+            self._invalidate_entity_subgraph()
         else:
             logger.warning("[Registry] update_cognitive_profile: entity %s not found", entity_id)
 
@@ -400,6 +409,55 @@ class CapabilityRegistry:
         return 1.0
 
     # ------------------------------------------------------------------
+    # Entity subgraph cache
+    # ------------------------------------------------------------------
+
+    def _invalidate_entity_subgraph(self) -> None:
+        """Mark the entity subgraph cache as stale.
+
+        Called after any mutation that changes entity/device/channel/capability
+        nodes or has_capability/equips/provides/enables edges.
+        """
+        self._entity_subgraph = None
+
+    def get_entity_subgraph(self) -> HyperGraph:
+        """Return a lightweight copy of the entity/device/channel/capability subgraph.
+
+        Cache hit  → O(N) dict copy (no node reconstruction).
+        Cache miss → rebuild from _graph, then return a copy.
+
+        The returned graph shares HNode/HEdge objects with the internal cache.
+        Callers must not mutate entity node attrs; they may freely add new
+        task/requires nodes and edges to the returned graph.
+        """
+        if self._entity_subgraph is None:
+            self._entity_subgraph = self._rebuild_entity_subgraph()
+            logger.debug(
+                "[Registry] entity_subgraph rebuilt (nodes=%d, edges=%d)",
+                len(self._entity_subgraph.nodes),
+                len(self._entity_subgraph.edges),
+            )
+        # Shallow copy: new dicts, shared HNode/HEdge objects
+        g = HyperGraph()
+        g.nodes = dict(self._entity_subgraph.nodes)
+        g.edges = dict(self._entity_subgraph.edges)
+        return g
+
+    def _rebuild_entity_subgraph(self) -> HyperGraph:
+        """Extract entity-related nodes/edges from _graph into a fresh HyperGraph."""
+        entity_kinds = {"entity", "device", "channel", "capability"}
+        entity_edge_kinds = {"has_capability", "equips", "provides", "enables"}
+        sub = HyperGraph()
+        for nid, node in self._graph.nodes.items():
+            if node.kind in entity_kinds:
+                sub.add_node(node)
+        node_ids = sub.nodes.keys()
+        for eid, edge in self._graph.edges.items():
+            if edge.kind in entity_edge_kinds and edge.nodes <= node_ids:
+                sub.add_edge(edge)
+        return sub
+
+    # ------------------------------------------------------------------
     # Unregistration
     # ------------------------------------------------------------------
 
@@ -410,6 +468,7 @@ class CapabilityRegistry:
             if device_id:
                 self._graph.remove_node(device_id)
         self._graph.remove_node(entity_id)
+        self._invalidate_entity_subgraph()
         logger.debug("Unregistered entity %s", entity_id)
 
     # ------------------------------------------------------------------

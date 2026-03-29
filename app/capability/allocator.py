@@ -38,16 +38,25 @@ from app.capability.allocation_metrics import compute_allocation_quality
 
 if TYPE_CHECKING:
     from app.experiment.controller import ExperimentController
+    from app.capability.registry import CapabilityRegistry
 
 logger = logging.getLogger(__name__)
 
 _experiment_controller: ExperimentController | None = None
+_registry: CapabilityRegistry | None = None
 
 
 def set_experiment_controller(ctrl: ExperimentController | None) -> None:
     """Inject experiment controller for allocation overrides."""
     global _experiment_controller
     _experiment_controller = ctrl
+
+
+def set_capability_registry(registry: CapabilityRegistry | None) -> None:
+    """Inject CapabilityRegistry so _build_hypergraph can reuse the cached entity subgraph."""
+    global _registry
+    _registry = registry
+
 
 _resolver = EffectiveCapabilityResolver()
 
@@ -56,17 +65,16 @@ _resolver = EffectiveCapabilityResolver()
 # Hypergraph construction (enhanced: includes device/channel nodes)
 # ------------------------------------------------------------------
 
-def _build_hypergraph(
+def _add_entities_to_graph(
+    graph: HyperGraph,
     entities: list[dict[str, Any]],
-    task_plan: dict[str, Any],
-) -> HyperGraph:
-    """Build a task-scoped hypergraph from entities + task plan.
+) -> None:
+    """Populate *graph* with entity/device/channel/capability nodes from *entities*.
 
-    Supports both robot entities (direct capabilities) and human entities
-    (device-derived capabilities via EffectiveCapabilityResolver).
+    Used as the fallback path when no registry cache is available, and to fill
+    in any entities that are present in the request payload but not yet in the
+    registry (e.g., transient simulation entities).
     """
-    graph = HyperGraph()
-
     for ent in entities:
         eid = ent.get("entity_id", "")
         if not eid:
@@ -139,6 +147,35 @@ def _build_hypergraph(
                             "collab_mode": mode_from_capability_mode(mode_raw),
                         },
                     ))
+
+
+def _build_hypergraph(
+    entities: list[dict[str, Any]],
+    task_plan: dict[str, Any],
+) -> HyperGraph:
+    """Build a task-scoped hypergraph from entities + task plan.
+
+    When a CapabilityRegistry is injected via set_capability_registry(), the
+    pre-built entity subgraph is reused (cache hit: O(N) dict copy; cache miss:
+    rebuild from registry._graph).  Any entities absent from the cache are
+    appended inline.  Without a registry, falls back to full construction from
+    the *entities* payload (original behaviour).
+    """
+    if _registry is not None:
+        graph = _registry.get_entity_subgraph()
+        # Fill in any entities present in the payload but not yet registered
+        # (e.g., transient simulation entities not sent via Zenoh).
+        missing = [e for e in entities if e.get("entity_id", "") not in graph.nodes]
+        if missing:
+            logger.warning(
+                "_build_hypergraph: %d entities missing from registry cache, building inline: %s",
+                len(missing),
+                [e.get("entity_id") for e in missing],
+            )
+            _add_entities_to_graph(graph, missing)
+    else:
+        graph = HyperGraph()
+        _add_entities_to_graph(graph, entities)
 
     # Task + requires edges
     for subtask in task_plan.get("subtasks", task_plan.get("phases", [])):

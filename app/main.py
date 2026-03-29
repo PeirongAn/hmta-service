@@ -23,7 +23,7 @@ from app.api.health import router as health_router
 from app.capability.registry import CapabilityRegistry
 from app.config import settings
 from app.log_setup import setup_logging
-from app.capability.allocator import set_experiment_controller
+from app.capability.allocator import set_experiment_controller, set_capability_registry
 from app.experiment.collector import PerformanceCollector
 from app.experiment.controller import ExperimentController
 from app.experiment.proficiency_store import ProficiencyStore
@@ -178,6 +178,7 @@ async def _startup() -> None:
     # 4d. Experiment controller (plan management + allocation overrides)
     _state.experiment_controller = ExperimentController()
     set_experiment_controller(_state.experiment_controller)
+    set_capability_registry(_state.capability_registry)
 
     # 4e. Dynamic reallocation callback
     _state.engine.set_reallocation_callback(_on_reallocation_trigger)
