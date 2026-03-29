@@ -1,0 +1,134 @@
+# ============================================================
+# Human Entity Profiles — 操作员设备配置 & 认知画像
+#
+# 用途：
+#   1. 当 UE5 发来的 HumanRegistration 不含 devices 字段时，
+#      HMTA 自动从此文件补全设备配置，构建超图能力节点。
+#   2. zenoh_client mock-devices / mock-human 与此文件保持一致，
+#      保证测试数据与设计态配置对齐。
+#
+# 字段说明：
+#   authority_level : observer | operator | commander
+#   devices         : 穿戴设备列表（初始状态均 online，battery 由运行态更新）
+#     - device_id   : 唯一设备标识，与 device_status 消息中的 device_id 对应
+#     - type        : ring | xr_glasses | glove | tablet | headset
+#     - channels    : 该设备提供的交互通道（必须在 capability-ontology.yaml 中定义）
+#     - constraints : 设计态约束（供 EffectiveCapabilityResolver 参考）
+#   cognitive_profile:
+#     max_concurrent_tasks : 最大并行任务数（影响注意力预算）
+#     decision_accuracy    : 决策准确率 0.0~1.0
+#     avg_response_sec     : 平均响应时间（秒）
+# ============================================================
+
+profiles:
+
+  # ── 操作员张三 ────────────────────────────────────────────
+  # Profile 查找优先级：
+  #   1. UE metadata.profile = "operator-01"  （推荐：UE 在 metadata 里加一行）
+  #   2. entity_id == "operator-01"            （适用于手动 mock / zenoh_client demo）
+  #   3. display_name == "操作员张三"            （display_name 精确匹配兜底）
+  operator-01:
+    display_name: 操作员张三
+    authority_level: operator
+    devices:
+      - device_id: ring_01
+        type: ring
+        channels:
+          - tap_command
+          - haptic_alert
+        constraints:
+          battery: 1.0
+      - device_id: xr_01
+        type: xr_glasses
+        channels:
+          - spatial_view
+          - ar_marking
+          - gaze_select
+          - video_feed
+        constraints:
+          battery: 1.0
+          render_fps: "60"
+      - device_id: glove_01
+        type: glove
+        channels:
+          - gesture_control
+          - hand_tracking
+          - force_feedback
+        constraints:
+          battery: 1.0
+    cognitive_profile:
+      max_concurrent_tasks: 3
+      decision_accuracy: 0.85
+      avg_response_sec: 8.0
+    proficiency_overrides:
+      approve: 0.95
+      path_planning: 0.70
+      observe: 0.85
+      quick_command: 0.90
+    metadata:
+      station: control-room-A
+    # UE 端对接说明：
+    #   在 UE5 蓝图角色的注册 metadata 中添加：
+    #     "profile": "operator-01"
+    #   即可自动关联此配置，无需修改其他字段。
+    #   示例发送的 JSON：
+    #     { "entity_id": "BP_FirstPersonCharacter1_C_0",
+    #       "category": "ENTITY_HUMAN", "action": "REG_REGISTER",
+    #       "metadata": { "profile": "operator-01" } }
+
+  # ── 操作员 B：分配对照实验（相对 operator-01）────────────────
+  # UE metadata: { "profile": "operator-01-alloc-contrast" }
+  # 特点：审批 proficiency 低、路径规划高 → allocator 更少把人绑在「审批」类子任务上
+  operator-01-alloc-contrast:
+    display_name: 操作员B（对照）
+    authority_level: operator
+    devices:
+      - device_id: ring_b
+        type: ring
+        channels: [tap_command, haptic_alert]
+        constraints: { battery: 1.0 }
+      - device_id: xr_b
+        type: xr_glasses
+        channels: [spatial_view, ar_marking, gaze_select, video_feed]
+        constraints: { battery: 1.0 }
+      - device_id: glove_b
+        type: glove
+        channels: [gesture_control, hand_tracking, force_feedback]
+        constraints: { battery: 1.0 }
+    cognitive_profile:
+      max_concurrent_tasks: 3
+      decision_accuracy: 0.82
+      avg_response_sec: 10.0
+    proficiency_overrides:
+      approve: 0.35
+      path_planning: 0.95
+      observe: 0.80
+      quick_command: 0.75
+    metadata:
+      station: control-room-B
+
+  # ── 指挥员李四（示例，仅 XR 眼镜 + 平板）────────────────────
+  commander-01:
+    display_name: 指挥员李四
+    authority_level: commander
+    devices:
+      - device_id: xr_c01
+        type: xr_glasses
+        channels:
+          - spatial_view
+          - ar_marking
+          - video_feed
+        constraints:
+          battery: 1.0
+      - device_id: tablet_c01
+        type: tablet
+        channels:
+          - tap_command
+        constraints:
+          battery: 1.0
+    cognitive_profile:
+      max_concurrent_tasks: 5
+      decision_accuracy: 0.92
+      avg_response_sec: 12.0
+    metadata:
+      station: command-center

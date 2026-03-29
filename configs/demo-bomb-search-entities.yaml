@@ -1,0 +1,81 @@
+# ── 找炸弹演示：生成请求用实体列表（POST /api/v1/generate 的 entities 字段）────
+# 与 capability-ontology.yaml、human-profiles.yaml 对齐。
+# UE 侧注册时：机器狗 entity_id 建议与下述 dog1/dog2 一致；操作员 metadata.profile 填 operator-01 或 operator-01-alloc-contrast
+
+entities:
+  - entity_id: dog1
+    type: robot
+    entity_type: robot
+    status: online
+    structured_capabilities:
+      - name: patrol
+        mode: autonomous
+        proficiency: 0.88
+      - name: navigate
+        mode: autonomous
+        proficiency: 0.9
+      - name: move
+        mode: autonomous
+        proficiency: 0.9
+      - name: scan
+        mode: supervised
+        proficiency: 0.75
+      - name: detect
+        mode: supervised
+        proficiency: 0.72
+
+  - entity_id: dog2
+    type: robot
+    entity_type: robot
+    status: online
+    structured_capabilities:
+      - name: patrol
+        mode: autonomous
+        proficiency: 0.82
+      - name: navigate
+        mode: autonomous
+        proficiency: 0.85
+      - name: move
+        mode: autonomous
+        proficiency: 0.85
+      - name: scan
+        mode: supervised
+        proficiency: 0.8
+      - name: detect
+        mode: supervised
+        proficiency: 0.78
+
+  # 操作员：内联设备（与 operator-01 画像一致，便于无 UE 时 curl 直连 HMTA）
+  - entity_id: operator-01
+    type: human
+    entity_type: human
+    status: online
+    display_name: 操作员张三
+    devices:
+      - device_id: ring_01
+        type: ring
+        channels: [tap_command, haptic_alert]
+        constraints: { battery: 1.0 }
+      - device_id: xr_01
+        type: xr_glasses
+        channels: [spatial_view, ar_marking, gaze_select, video_feed]
+        constraints: { battery: 1.0 }
+      - device_id: glove_01
+        type: glove
+        channels: [gesture_control, hand_tracking, force_feedback]
+        constraints: { battery: 1.0 }
+    cognitive_profile:
+      max_concurrent_tasks: 3
+      decision_accuracy: 0.85
+      avg_response_sec: 8.0
+    proficiency_overrides:
+      approve: 0.95
+      path_planning: 0.70
+      observe: 0.85
+
+environment:
+  scene: L_Convolution_Blockout
+  threat_context: bomb_search
+
+task_context:
+  objective: 在建筑内搜索并定位爆炸物，两只机器狗分区巡逻，发现可疑物后按分配策略由人或狗确认。

@@ -1,0 +1,60 @@
+# 与 demo-bomb-search-entities.yaml 相同场景，仅操作员 proficiency 不同（对照 allocator 结果）
+# 用法：将本文件 entities 中 operator-01 一段替换进生成请求，或与默认 demo 交替 POST /api/v1/generate
+
+entities:
+  - entity_id: dog1
+    type: robot
+    entity_type: robot
+    status: online
+    structured_capabilities:
+      - { name: patrol, mode: autonomous, proficiency: 0.88 }
+      - { name: navigate, mode: autonomous, proficiency: 0.9 }
+      - { name: move, mode: autonomous, proficiency: 0.9 }
+      - { name: scan, mode: supervised, proficiency: 0.75 }
+      - { name: detect, mode: supervised, proficiency: 0.72 }
+
+  - entity_id: dog2
+    type: robot
+    entity_type: robot
+    status: online
+    structured_capabilities:
+      - { name: patrol, mode: autonomous, proficiency: 0.82 }
+      - { name: navigate, mode: autonomous, proficiency: 0.85 }
+      - { name: move, mode: autonomous, proficiency: 0.85 }
+      - { name: scan, mode: supervised, proficiency: 0.8 }
+      - { name: detect, mode: supervised, proficiency: 0.78 }
+
+  - entity_id: operator-01
+    type: human
+    entity_type: human
+    status: online
+    display_name: 操作员B（对照）
+    devices:
+      - device_id: ring_b
+        type: ring
+        channels: [tap_command, haptic_alert]
+        constraints: { battery: 1.0 }
+      - device_id: xr_b
+        type: xr_glasses
+        channels: [spatial_view, ar_marking, gaze_select, video_feed]
+        constraints: { battery: 1.0 }
+      - device_id: glove_b
+        type: glove
+        channels: [gesture_control, hand_tracking, force_feedback]
+        constraints: { battery: 1.0 }
+    cognitive_profile:
+      max_concurrent_tasks: 3
+      decision_accuracy: 0.82
+      avg_response_sec: 10.0
+    proficiency_overrides:
+      approve: 0.35
+      path_planning: 0.95
+      observe: 0.80
+      quick_command: 0.75
+
+environment:
+  scene: L_Convolution_Blockout
+  threat_context: bomb_search
+
+task_context:
+  objective: 在建筑内搜索并定位爆炸物，两只机器狗分区巡逻，发现可疑物后按分配策略由人或狗确认。

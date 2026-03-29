@@ -1,0 +1,566 @@
+# Capability ontology — extend freely without changing code.
+# ─────────────────────────────────────────────────────────
+# Sections:
+#   taxonomy          — capability hierarchy + aliases
+#   channels          — interaction channel definitions per device type
+#   enables_rules     — which channel combinations unlock which capability
+#   collaboration_modes — mode thresholds, attention cost, required channels
+#   utility_weights   — scoring weights for allocator
+
+# ── Capability taxonomy ───────────────────────────────────
+# param_defs: describes parameters required when invoking a capability.
+#   name:          parameter name (matches execution_params key)
+#   type:          data type: float | bool | string | vec3 | array<vec3>
+#   required:      whether the caller must supply this param
+#   source:        |-separated priority chain — who provides the value:
+#                    human   → operator via interactive input (Minimap, XR, etc.)
+#                    preset  → task template / mission plan pre-populates it
+#                    llm     → bt_builder LLM fills it during generation
+#                    config  → static capability metadata default
+#                    runtime → entity state at execution time
+#   input_mode:    how the human provides the value (only relevant when source includes "human"):
+#                    point_pick  → click single location on Minimap
+#                    path_draw   → draw / select ordered sequence of points
+#                    region_select → drag region on map
+#                    text_input  → free text
+#                    select      → choose from a predefined list
+#                    auto        → system fills automatically (no UI needed)
+#   default_value: fallback if optional param not supplied
+taxonomy:
+  locomotion:
+    move:
+      aliases: [navigate, navigation, navigation.move_to, move_to, goto, 移动, 自主导航, 导航]
+      ue_action_type: "NAVIGATE"
+      ue_param_layout:
+        top_level: ["end", "start", "pose"]
+        params: ["speed"]
+      input_schema:
+        end:
+          type: vec3
+          required: true
+          source: "runtime|preset|human"
+          input_mode: point_pick
+          description: 目标坐标 (UE cm)
+        start:
+          type: vec3
+          required: false
+          source: "runtime"
+          description: 起点坐标（默认当前位置）
+        speed:
+          type: float
+          required: false
+          source: "config|llm"
+          default_value: 300
+      preconditions: ["entity_idle"]
+      effects: ["position_reached"]
+
+    patrol:
+      aliases: [巡逻, 自主巡逻, 区域巡逻]
+      parent: move
+      ue_action_type: "PATROL"
+      ue_param_layout:
+        top_level: ["waypoints"]
+        params: ["zone_id", "pattern", "speed"]
+      input_schema:
+        waypoints:
+          type: "array<vec3>"
+          required: true
+          source: "human|preset"
+          input_mode: point_pick
+          description: 巡逻路径点序列；无预设时由操作员在 Minimap 上选点
+        zone_id:
+          type: string
+          required: true
+          source: "preset|human"
+          input_mode: text_input
+          default_value: "default"
+          description: 巡逻区域 ID
+        pattern:
+          type: string
+          required: false
+          source: "config|llm"
+          default_value: "perimeter"
+          enum: ["perimeter", "grid", "random"]
+          description: 巡逻模式
+        speed:
+          type: float
+          required: false
+          source: "config|llm"
+          default_value: 200
+          description: 巡逻速度（cm/s）
+      preconditions: ["entity_idle"]
+      effects: ["area_patrolled"]
+
+    follow_by_path:
+      aliases: [路径跟随, follow_path, 路径执行]
+      parent: move
+      ue_action_type: "FOLLOW_PATH"
+      ue_param_layout:
+        top_level: ["waypoints"]
+        params: ["speed", "tolerance", "loop"]
+      input_schema:
+        waypoints:
+          type: "array<vec3>"
+          required: true
+          source: "human|preset"
+          input_mode: path_draw
+          description: 路径点序列；无预设时由操作员在 Minimap 上规划
+        speed:
+          type: float
+          required: false
+          source: "config|llm"
+          default_value: 200
+          description: 跟随速度（cm/s）
+        tolerance:
+          type: float
+          required: false
+          source: "config"
+          default_value: 50
+          description: 到达判定半径 (cm)
+        loop:
+          type: bool
+          required: false
+          source: "llm|config"
+          default_value: false
+          description: 到达终点后是否返回起点循环
+      preconditions: ["entity_idle"]
+      effects: ["path_completed"]
+
+    follow:
+      aliases: [跟踪]
+      parent: move
+    transport:
+      aliases: [搬运]
+      parent: move
+
+  perception:
+    detect:
+      aliases: [探测, 嗅探, 目标探测, 炸弹探测, 威胁探测]
+      ue_action_type: "DETECT"
+      ue_param_layout:
+        top_level: []
+        params: ["duration_sec", "target_classes", "min_confidence"]
+      input_schema:
+        duration_sec:
+          type: float
+          required: false
+          source: "config|llm"
+          default_value: 5
+          description: 检测持续时长 (秒)
+        target_classes:
+          type: string
+          required: false
+          source: "llm|config"
+          default_value: ""
+          description: 逗号分隔目标类别 (如 bomb,person,weapon)
+        min_confidence:
+          type: float
+          required: false
+          source: "config"
+          default_value: 0.05
+          description: 最低置信度 (0~1)
+      preconditions: ["entity_idle", "detection_service_available"]
+      effects: ["targets_identified"]
+
+    scan:
+      aliases: [扫描, 环境扫描, 区域扫描, 场景扫描]
+      parent: detect
+      ue_action_type: "SCAN"
+      ue_param_layout:
+        top_level: []
+        params: ["zone_id", "mode", "fov", "pitch_fov", "duration_sec"]
+      input_schema:
+        zone_id:
+          type: string
+          required: true
+          source: "preset|human"
+          input_mode: text_input
+          default_value: ""
+          description: 扫描区域 ID
+        mode:
+          type: string
+          required: false
+          source: "config|llm"
+          default_value: "horizontal"
+          enum: ["horizontal", "serpentine"]
+          description: 扫描模式
+        fov:
+          type: float
+          required: false
+          source: "config"
+          default_value: 180
+          description: 水平扫描范围 (deg)
+        pitch_fov:
+          type: float
+          required: false
+          source: "config"
+          default_value: 60
+          description: 俯仰扫描范围 (deg，仅 serpentine)
+        duration_sec:
+          type: float
+          required: false
+          source: "config|llm"
+          default_value: 5
+          description: 扫描时长 (秒)
+      preconditions: ["entity_idle"]
+      effects: ["area_scanned"]
+
+    surveil:
+      aliases: [监视]
+      parent: detect
+    observe:
+      aliases: [观察, 侦察]
+      parent: detect
+
+  manipulation:
+    disarm:
+      aliases: [排爆]
+      ue_action_type: "DISARM"
+      ue_param_layout:
+        top_level: []
+        params: ["target_id", "approach_direction"]
+      input_schema:
+        target_id:
+          type: string
+          required: true
+          source: "runtime|human"
+          input_mode: text_input
+          description: 排爆目标 ID
+        approach_direction:
+          type: string
+          required: false
+          source: "llm|config"
+          default_value: "front"
+          description: 接近方向
+      preconditions: ["entity_idle", "targets_identified"]
+      effects: ["target_disarmed"]
+    manipulate:
+      aliases: [操作]
+
+  control:
+    wait:
+      aliases: [等待, halt, stop]
+      ue_action_type: "WAIT"
+      ue_param_layout:
+        top_level: []
+        params: []
+      input_schema: {}
+      preconditions: []
+      effects: []
+
+    set_gimbal:
+      aliases: [云台控制]
+      ue_param_layout:
+        top_level: []
+        params: ["yaw", "pitch"]
+      input_schema:
+        yaw:
+          type: float
+          required: false
+          source: "llm|human"
+          default_value: 0
+          description: 水平角度 (deg, 正=右, 负=左)
+        pitch:
+          type: float
+          required: false
+          source: "llm|human"
+          default_value: 0
+          description: 俯仰角度 (deg, 正=上, 负=下)
+      preconditions: []
+      effects: []
+
+  human_interaction:
+    approve:
+      aliases: [批准, 审批, decision_approve]
+      input_schema:
+        decision:
+          type: string
+          required: true
+          source: "human"
+          input_mode: select
+          enum: ["approve", "reject", "defer"]
+          description: 审批决定
+        reason:
+          type: string
+          required: false
+          source: "human"
+          input_mode: text_input
+          description: 审批理由
+      preconditions: ["decision_required"]
+      effects: ["decision_made"]
+    report:
+      aliases: [汇报]
+    remote_operate:
+      aliases: [遥控, teleoperation, remote_control]
+      channel_quality_map:
+        "spatial_view+gesture_control+force_feedback": 1.0
+        "spatial_view+gesture_control": 0.7
+        "video_feed+tap_command": 0.3
+      input_schema:
+        target_entity:
+          type: string
+          required: true
+          source: "runtime"
+          description: 被操控的机器实体 ID
+      preconditions: ["entity_idle"]
+      effects: []
+    visual_confirm:
+      aliases: [目视确认]
+      channel_quality_map:
+        "spatial_view+gaze_select": 1.0
+        "video_feed": 0.5
+      input_schema:
+        target_id:
+          type: string
+          required: true
+          source: "runtime"
+          description: 需要确认的目标 ID
+        confirmation:
+          type: string
+          required: true
+          source: "human"
+          input_mode: select
+          enum: ["confirmed", "rejected", "uncertain"]
+          description: 确认结果
+      preconditions: ["targets_identified"]
+      effects: ["target_confirmed"]
+    bomb_disposal:
+      aliases: [人工排爆]
+      input_schema:
+        target_id:
+          type: string
+          required: true
+          source: "runtime"
+          description: 排爆目标 ID
+        approach_plan:
+          type: string
+          required: false
+          source: "human"
+          input_mode: text_input
+          description: 接近方案
+      preconditions: ["target_confirmed", "entity_idle"]
+      effects: ["target_disarmed"]
+    scene_mark:
+      aliases: [现场标记, ar_annotate]
+      channel_quality_map:
+        "spatial_view+gaze_select+ar_marking": 1.0
+        "spatial_view+gaze_select": 0.6
+      input_schema:
+        position:
+          type: vec3
+          required: true
+          source: "human"
+          input_mode: point_pick
+          description: 标记位置
+        label:
+          type: string
+          required: false
+          source: "human"
+          input_mode: text_input
+          description: 标记标签
+      preconditions: []
+      effects: ["scene_marked"]
+    path_planning:
+      aliases: [路径规划, plan_path]
+      input_schema:
+        waypoints:
+          type: "array<vec3>"
+          required: true
+          source: "human"
+          input_mode: path_draw
+          description: 人工规划的路径点
+      preconditions: []
+      effects: ["path_planned"]
+    quick_command:
+      aliases: [快速指令]
+
+# ── Interaction channels ─────────────────────────────────
+# Each entry: direction ∈ {input, output, both}, device_types that provide it
+channels:
+  tap_command:
+    direction: input
+    device_types: [ring]
+    description: 轻触指令（单击/双击/长按）
+
+  haptic_alert:
+    direction: output
+    device_types: [ring]
+    description: 震动反馈
+
+  spatial_view:
+    direction: output
+    device_types: [xr_glasses]
+    description: 3D 空间视图叠加显示
+
+  ar_marking:
+    direction: both
+    device_types: [xr_glasses]
+    description: AR 标注（查看 + 创建）
+
+  gaze_select:
+    direction: input
+    device_types: [xr_glasses]
+    description: 注视选择
+
+  video_feed:
+    direction: output
+    device_types: [xr_glasses]
+    description: 实时视频流显示
+
+  gesture_control:
+    direction: input
+    device_types: [glove]
+    description: 手势操控
+
+  hand_tracking:
+    direction: input
+    device_types: [glove]
+    description: 手部精确追踪
+
+  force_feedback:
+    direction: output
+    device_types: [glove]
+    description: 力反馈
+
+  voice_command:
+    direction: input
+    device_types: [headset]
+    description: 语音指令
+
+  audio_alert:
+    direction: output
+    device_types: [headset]
+    description: 音频提醒
+
+# ── Enables rules ─────────────────────────────────────────
+# Defines which channel combinations unlock a human capability.
+# All listed required_channels must be available simultaneously.
+# Optional inherent_only: true means the human has it without any device.
+enables_rules:
+  approve:
+    required_channels: [tap_command]
+    description: 审批/拒绝指令
+
+  quick_command:
+    required_channels: [tap_command]
+    description: 快速简单指令
+
+  voice_quick_command:
+    maps_to: quick_command
+    required_channels: [voice_command]
+    description: 语音快速指令（maps_to 表示等价能力）
+
+  observe:
+    required_channels: [spatial_view]
+    description: 态势感知与观察
+
+  ar_annotate:
+    required_channels: [spatial_view, gaze_select]
+    description: AR 空间标注
+
+  path_planning:
+    required_channels: [spatial_view, gesture_control]
+    description: 在 3D 空间中规划路径点
+
+  remote_operate:
+    required_channels: [spatial_view, gesture_control, force_feedback]
+    description: 远程操控机器人（需完整力反馈）
+
+# ── Collaboration modes ───────────────────────────────────
+# mode_key maps to CapabilityMode (AUTONOMOUS / SUPERVISED / REMOTE_CONTROL)
+collaboration_modes:
+  task_based:
+    capability_mode: MODE_AUTONOMOUS
+    description: 任务式 — 人发指令，机器自主执行，失败时上报人工
+    min_channels: []
+    attention_cost_base: 0.0
+    bt_pattern_default: supervised_fallback
+
+  partner:
+    capability_mode: MODE_SUPERVISED
+    description: 伙伴式 — 人机协同，人审核监督
+    min_channels: [tap_command]
+    attention_cost_base: 0.15
+    bt_pattern_default: supervised_report
+
+  proxy:
+    capability_mode: MODE_REMOTE_CONTROL
+    description: 代理式 — 人通过机器行动，持续操控
+    min_channels: [spatial_view, tap_command]
+    attention_cost_base: 0.80
+    bt_pattern_default: human_plan_execute
+
+# ── BT patterns ───────────────────────────────────────────
+# bt_pattern → BT structure template (consumed by bt_builder LLM)
+bt_patterns:
+  autonomous:
+    description: 全自主执行，无需人介入
+    structure: "action(intent, robot)"
+
+  supervised_fallback:
+    description: 机器自主执行，失败时上报人工（重试/跳过/重参数化）
+    structure: "fallback(action(intent, robot), humanGate(task_assist, human))"
+
+  supervised_report:
+    description: 机器执行，完成后向人汇报
+    structure: "sequence(action(intent, robot), action(report, human))"
+
+  human_approve_execute:
+    description: 人先审批，再自主执行
+    structure: "sequence(humanGate(approve, human), action(intent, robot))"
+
+  human_plan_execute:
+    description: 人规划路径（Minimap 选点），机器跟随执行
+    structure: "sequence(humanGate(path_planning, human), action(follow_by_path, robot))"
+
+  human_remote_control:
+    description: 人直接操控，机器完全受控
+    structure: "humanGate(remote_operate, human, robot)"
+
+# ── Utility weights ───────────────────────────────────────
+# Shared by utility.py; tune without code changes.
+utility_weights:
+  robot:
+    proficiency: 0.30
+    proximity: 0.20
+    energy: 0.15
+    availability: 0.15
+    mode_preference: 0.10
+    risk: -0.05
+    collaboration: 0.05
+
+  human:
+    decision_accuracy: 0.30
+    response_speed: 0.20
+    authority_match: 0.20
+    cognitive_load: -0.15
+    fatigue: -0.15
+
+  attention_budget:
+    total: 1.0           # total human attention per operator per planning horizon
+    reserve: 0.1         # always keep 10% for emergencies
+
+# ── Feedback-driven proficiency learning (post-mission) ───────────────
+feedback:
+  enabled: true
+  learning_rate: 0.2
+  min_proficiency: 0.1
+  max_proficiency: 1.0
+  duration_baseline_ms: 30000
+  # Baseline for human response speed scoring (ms). Responses faster than
+  # this threshold score full speed_eff = 1.0; slower responses scale down.
+  human_response_baseline_ms: 30000
+  bottleneck_thresholds:
+    duration_multiplier: 2.0
+    intervention_count: 2
+    intervention_pct: 0.3
+
+# ── Oracle (ground-truth capability judgment) ────────────────────────
+oracle:
+  enabled: true
+  # Max distance (UE cm) to consider a robot detection as matching a
+  # known ground-truth target.  Detections farther away are judged as
+  # false positives.
+  detection_match_threshold_cm: 200.0
+  # Timeout for NavMesh reachability queries (future).
+  navmesh_query_timeout_sec: 5.0

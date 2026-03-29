@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hmta-service"
+version = "0.1.0"
+description = "Human-Machine Task Allocation Service — LangGraph generation + py_trees execution"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # LangGraph / LangChain
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-core>=0.3.0",
+    # BT execution
+    "py_trees>=2.2.3",
+    # Zenoh
+    "eclipse-zenoh>=1.0.0",
+    # FastAPI
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    # Pydantic
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    # FSM
+    "python-statemachine>=2.3.0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "structlog>=24.4.0",
+    "tenacity>=9.0.0",
+    "pyyaml>=6.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "httpx>=0.27.0",
+    "ruff>=0.7.0",
+    "mypy>=1.12.0",
+]
+
+[project.scripts]
+hmta-service = "app.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true

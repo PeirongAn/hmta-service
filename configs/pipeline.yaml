@@ -1,0 +1,46 @@
+# Declarative generation pipeline configuration.
+# Each entry defines a LangGraph node. Set `enabled: false` to skip a node.
+# Nodes are wired in the order listed; `retry_target` creates a conditional
+# back-edge from a validator node to the specified repair node.
+#
+# bt_template_builder (enabled) replaces the LLM bt_builder with a fixed
+# generic HMTA tree. bt_builder and validator are kept disabled as fallback.
+# To revert to LLM-based generation:
+#   1. Set bt_template_builder.enabled: false
+#   2. Set bt_builder.enabled: true
+#   3. Set validator.enabled: true
+
+pipeline:
+  - name: goal_extractor
+    type: llm
+    enabled: true
+
+  - name: task_planner
+    type: llm
+    enabled: true
+
+  - name: coverage_ensurer
+    type: rule
+    enabled: true
+
+  - name: allocator
+    type: quantitative
+    enabled: true
+
+  - name: bt_template_builder
+    type: template
+    enabled: true
+
+  - name: bt_builder
+    type: llm
+    enabled: false
+
+  - name: validator
+    type: rule
+    enabled: false
+    retry_target: bt_builder
+    max_iterations: 3
+
+  - name: fsm_bb_init
+    type: template
+    enabled: true
