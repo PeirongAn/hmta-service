@@ -322,7 +322,6 @@ class CapabilityRegistry:
             if edge and edge.kind == "has_capability":
                 edge.weight = prof
                 applied += 1
-        self._invalidate_entity_subgraph()
         logger.info(
             "[Registry] load_persisted_proficiency: %d persisted, %d applied to existing edges",
             len(self._persisted_proficiency), applied,
@@ -350,7 +349,6 @@ class CapabilityRegistry:
             edge.attrs.setdefault("proficiency_history", []).append({
                 "value": old, "updated_at": _time.time(),
             })
-            self._invalidate_entity_subgraph()
             logger.info(
                 "[Registry] proficiency updated: %s/%s  %.3f → %.3f",
                 entity_id, canonical, old, edge.weight,
