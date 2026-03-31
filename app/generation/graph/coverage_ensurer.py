@@ -176,20 +176,40 @@ def coverage_ensurer_node(state: GenerationState) -> dict:
     template_caps = _infer_capabilities(subtasks)
     template_params = _infer_shared_params(subtasks)
 
-    # 6. Generate fill subtasks
+    # 6. Generate fill subtasks and insert at priority-appropriate position
+    #    Auto-generated tasks default to "normal" priority.
+    #    Insert them before the first existing "normal" task so higher-priority
+    #    tasks remain at the front; fall back to appending if no normal task found.
+    _priority_order = {"critical": 0, "urgent": 1, "normal": 2}
+    insert_index = next(
+        (
+            i for i, st in enumerate(subtasks)
+            if _priority_order.get(st.get("priority", "normal"), 2) >= 2
+        ),
+        len(subtasks),
+    )
+
+    fill_tasks: list[dict] = []
     for z in missing:
         fill_params = {**template_params, "zone_id": z["id"]}
-        subtasks.append({
+        zone_priority = z.get("priority", "normal")
+        fill_tasks.append({
             "subtask_id": f"auto_{z['id']}",
             "description": f"扫描 {z.get('name') or z.get('display_name') or z['id']}",
             "required_capabilities": list(template_caps),
             "params": fill_params,
+            "priority": zone_priority,
             "dependencies": [],
             "assigned_entity_ids": [],
             "termination": {"type": "natural"},
             "is_concurrent": True,
             "_auto_generated": True,
         })
+
+    # Sort fill tasks by their own priority before inserting
+    fill_tasks.sort(key=lambda t: _priority_order.get(t.get("priority", "normal"), 2))
+    for offset, ft in enumerate(fill_tasks):
+        subtasks.insert(insert_index + offset, ft)
 
     task_plan["subtasks"] = subtasks
 

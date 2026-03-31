@@ -406,6 +406,14 @@ def allocator_node(state: dict) -> dict:
 
         # --- Step 2: score robots, pick best (with load balancing) --------
         robot_scores = [s for eid in robot_candidates if (s := _score_robot(eid, subtask, graph, context))]
+        # Apply LLM pre-assignment hint bonus: treat planner's assignment as soft constraint
+        # (capture before we overwrite it at Step 5)
+        llm_hint_ids: list[str] = list(subtask.get("assigned_entity_ids") or [])
+        if llm_hint_ids:
+            for score in robot_scores:
+                if score.entity_id in llm_hint_ids:
+                    score.total = round(score.total + 0.15, 4)
+                    score.breakdown["llm_hint_bonus"] = 0.15
         # Apply load-balancing penalty: each already-assigned task reduces score by 0.05
         for score in robot_scores:
             load_penalty = robot_task_count.get(score.entity_id, 0) * 0.05
@@ -587,6 +595,12 @@ def allocator_node(state: dict) -> dict:
 
     # Derive task dependency edges from ontology preconditions/effects
     derive_task_dependencies(graph, task_plan)
+
+    # Issue #4: write priority-sorted order back so downstream sees consistent ordering
+    if "subtasks" in task_plan:
+        task_plan["subtasks"] = subtasks_sorted
+    elif "phases" in task_plan:
+        task_plan["phases"] = subtasks_sorted
 
     return {
         "task_plan": task_plan,

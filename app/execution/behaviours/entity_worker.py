@@ -432,6 +432,9 @@ class EntityWorker(py_trees.behaviour.Behaviour):
         except Exception:
             return None
 
+        _priority_order = {"critical": 0, "urgent": 1, "normal": 2}
+        eligible: list[dict] = []
+
         for task in queue:
             if task.get("entity") != self.entity_id:
                 continue
@@ -452,9 +455,14 @@ class EntityWorker(py_trees.behaviour.Behaviour):
                         self.entity_id, task.get("id"),
                     )
                     continue
-                return task
+                eligible.append(task)
 
-        return None
+        if not eligible:
+            return None
+
+        # Return highest-priority task; preserve queue order as tiebreaker
+        eligible.sort(key=lambda t: _priority_order.get(t.get("priority", "normal"), 2))
+        return eligible[0]
 
     # ── Generic precondition / effect evaluation ─────────────────────────────
 

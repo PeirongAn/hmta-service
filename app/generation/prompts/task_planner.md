@@ -196,4 +196,7 @@ Rules:
 ## Task Context
 {task_context}
 
+## Language
+All human-readable text fields (`description`, `name`, `doctrine_notes`, `constraints`) MUST be written in **Chinese (Simplified)**. Capability IDs, zone IDs, entity IDs, and all other identifier fields remain in English.
+
 Respond ONLY with the JSON object. No markdown fences, no explanation.

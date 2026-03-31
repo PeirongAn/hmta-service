@@ -245,6 +245,41 @@ def _derive_task_conditions(
 
 # ── Task Queue builder ────────────────────────────────────────────────────────
 
+def _topological_sort_queue(queue: list[dict]) -> list[dict]:
+    """Return queue reordered so every task appears after all its dependencies.
+
+    Uses Kahn's BFS algorithm.  If a cycle is detected (impossible to
+    satisfy all deps) the original order is preserved and a warning is logged.
+    """
+    id_to_task = {t["id"]: t for t in queue}
+    in_degree: dict[str, int] = {t["id"]: 0 for t in queue}
+    dependents: dict[str, list[str]] = {t["id"]: [] for t in queue}
+
+    for task in queue:
+        for dep_id in task.get("depends_on") or []:
+            if dep_id in id_to_task:
+                in_degree[task["id"]] += 1
+                dependents[dep_id].append(task["id"])
+
+    ready = [tid for tid, deg in in_degree.items() if deg == 0]
+    sorted_ids: list[str] = []
+    while ready:
+        tid = ready.pop(0)
+        sorted_ids.append(tid)
+        for child in dependents.get(tid, []):
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                ready.append(child)
+
+    if len(sorted_ids) != len(queue):
+        logger.warning(
+            "[fsm_bb_init] topological sort detected a cycle — keeping original queue order",
+        )
+        return queue
+
+    return [id_to_task[tid] for tid in sorted_ids]
+
+
 def _build_task_queue(
     task_plan: dict,
     capability_graph_dict: dict | None,
@@ -313,7 +348,7 @@ def _build_task_queue(
         bt_pattern = interaction.get("bt_pattern") or st.get("bt_pattern") or "supervised_fallback"
         human_supervisor = interaction.get("human_supervisor") or st.get("human_supervisor")
         params = dict(st.get("params") or {})
-        description = st.get("description") or st.get("name") or f"{intent} ({tid})"
+        description = st.get("description") or st.get("name") or f"{intent}任务 ({tid})"
 
         # One task queue item per assigned entity
         entity = assigned_ids[0] if assigned_ids else "unknown"
@@ -346,6 +381,9 @@ def _build_task_queue(
             "completed_at": None,
             "failure_reason": None,
         })
+
+    # Topological sort so dependencies always precede dependents in the queue
+    queue = _topological_sort_queue(queue)
 
     logger.info(
         "[fsm_bb_init] task_queue: %d tasks built (%d with dependencies)",
