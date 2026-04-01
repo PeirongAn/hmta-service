@@ -20,12 +20,14 @@ from pydantic import ValidationError
 from app.api.capability import router as capability_router
 from app.api.experiment import experiment_router
 from app.api.health import router as health_router
+from app.api.mission import entity_router as entity_router, mission_router
 from app.capability.registry import CapabilityRegistry
 from app.config import settings
 from app.log_setup import setup_logging
 from app.capability.allocator import set_experiment_controller
 from app.experiment.collector import PerformanceCollector
 from app.experiment.controller import ExperimentController
+from app.experiment.mission_store import MissionStore
 from app.experiment.proficiency_store import ProficiencyStore
 from app.experiment.store import ExperimentStore
 from app.execution.command.command_resolver import CommandResolver
@@ -69,6 +71,7 @@ class AppState:
         self.intervention_handler: InterventionHandler | None = None
         self.experiment_store: ExperimentStore | None = None
         self.proficiency_store: ProficiencyStore | None = None
+        self.mission_store: MissionStore | None = None
         self.experiment_controller: ExperimentController | None = None
         self.performance_collector: PerformanceCollector | None = None
         self.oracle_service = None
@@ -186,12 +189,17 @@ async def _startup() -> None:
     # 4e-2. Unified proficiency store (same experiments.db, three new tables)
     _state.proficiency_store = ProficiencyStore()
     persisted_proficiency = _state.proficiency_store.load_all_current()
+
     if persisted_proficiency:
         _state.capability_registry.load_persisted_proficiency(persisted_proficiency)
         logger.info(
             "Restored %d persisted proficiency values into CapabilityRegistry",
             len(persisted_proficiency),
         )
+
+    # 4e-2b. Mission store (missions, mission_entities, entity_profiles, entity_performance)
+    _state.mission_store = MissionStore()
+    logger.info("MissionStore initialised")
 
     # 4e-3. Oracle service (ground-truth capability judgment)
     try:
@@ -273,6 +281,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _startup()
     app.state.experiment_store = _state.experiment_store
     app.state.proficiency_store = _state.proficiency_store
+    app.state.mission_store = _state.mission_store
     app.state.experiment_controller = _state.experiment_controller
     try:
         yield
@@ -297,6 +306,8 @@ app_fastapi.add_middleware(
 app_fastapi.include_router(health_router)
 app_fastapi.include_router(capability_router)
 app_fastapi.include_router(experiment_router)
+app_fastapi.include_router(mission_router)
+app_fastapi.include_router(entity_router)
 
 
 # ── Generation request handler ────────────────────────────────────────────────
