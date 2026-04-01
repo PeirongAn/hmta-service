@@ -1,3 +1,11 @@
 /logs
 /data
+.env
 /.venv
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-shm
+*.db-wal
+.claude/
