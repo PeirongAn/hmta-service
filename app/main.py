@@ -184,6 +184,8 @@ async def _startup() -> None:
 
     # 4e. Dynamic reallocation callback
     _state.engine.set_reallocation_callback(_on_reallocation_trigger)
+    # 4e-1. Mission summary persistence callback
+    _state.engine.set_mission_summary_callback(_on_mission_summary)
     logger.info("Experiment store + controller + performance collector initialised")
 
     # 4e-2. Unified proficiency store (same experiments.db, three new tables)
@@ -335,6 +337,24 @@ def _handle_execution_start(data: dict) -> None:
 
     tick_period = data.get("tick_period_ms", 200)
     logger.info("Execution start command received — launching tick loop (period=%dms)", tick_period)
+
+    # Publish mission_started now that execution is actually beginning (not at generation time)
+    import time as _exec_time
+    try:
+        import py_trees
+        bb_storage = py_trees.blackboard.Blackboard.storage
+        objective = bb_storage.get("/objective", bb_storage.get("objective", ""))
+        tree_id = engine.tree.id if engine.tree else "unknown"
+    except Exception:
+        objective = ""
+        tree_id = "unknown"
+    _state.zenoh_bridge.publish("zho/bt/mission_started", {
+        "mission_started_at": _exec_time.time() * 1000,
+        "task_id": tree_id,
+        "objective": objective,
+    })
+    logger.info("Published mission_started: task_id=%s objective=%r", tree_id, objective)
+
     _state.zenoh_bridge.publish_execution_status("starting")
 
     def _run() -> None:
@@ -392,11 +412,6 @@ async def _run_generation(request: dict) -> GenerationTaskRecord:
     task_id = request.get("task_id", "unknown")
     logger.info("Generation request received: task_id=%s (mission_started_at=%.0f)", task_id, mission_started_at)
 
-    bridge.publish("zho/bt/mission_started", {
-        "mission_started_at": mission_started_at,
-        "task_id": task_id,
-    })
-
     try:
         payload = GenerationRequest.model_validate(request)
     except ValidationError as exc:
@@ -408,6 +423,28 @@ async def _run_generation(request: dict) -> GenerationTaskRecord:
         return failure
 
     task_id = payload.task_id or task_id
+
+    if _state.mission_store:
+        try:
+            import json as _json
+            entities_snapshot = []
+            for eid in _state.capability_registry.all_entity_ids():
+                node = _state.capability_registry._graph.nodes.get(eid)
+                attrs = dict(node.attrs) if node else {}
+                entities_snapshot.append({"entity_id": eid, **attrs})
+            _state.mission_store.create_mission(
+                mission_id=task_id,
+                task_name=request.get("objective", ""),
+                task_type=request.get("task_type", ""),
+                objective=request.get("objective", ""),
+                started_at=mission_started_at,
+                entities=entities_snapshot,
+                generation_request_json=_json.dumps(request),
+            )
+            logger.info("[MissionStore] Created mission record: task_id=%s entities=%d", task_id, len(entities_snapshot))
+        except Exception:
+            logger.exception("[MissionStore] create_mission failed: task_id=%s", task_id)
+
     graph = get_graph()
     initial_state = build_initial_state(payload, task_id)
 
@@ -691,6 +728,13 @@ def _on_entity_registry(entity_id: str, data: dict) -> None:
                 cr_payload["structured_capabilities"] = cr_payload["structuredCapabilities"]
         _state.command_resolver.register_entity(cr_payload)
 
+    # Persist entity profile — use the enriched payload (merged with human profile for humans)
+    if _state.mission_store:
+        try:
+            _state.mission_store.upsert_entity_profile(payload)
+        except Exception:
+            logger.exception("[MissionStore] upsert_entity_profile failed for entity=%s", entity_id)
+
     logger.debug("[Registry] processed: %s (human=%s)", entity_id, is_human)
 
 
@@ -814,6 +858,105 @@ def _on_reallocation_trigger(triggers: list[dict]) -> None:
             "zho/allocation/reallocation_trigger",
             {"reason": reason, "entity_id": entity_id, **trigger},
         )
+
+
+# ── Mission summary persistence ────────────────────────────────────────────────
+
+def _on_mission_summary(task_id: str, summary: dict) -> None:
+    """Persist mission conclusion data when the ExecutionEngine completes a mission.
+
+    Called synchronously from the BT tick thread, so all DB writes must be fast
+    and must not raise (exceptions are swallowed to avoid disrupting the tick loop).
+    """
+    import json as _json
+    import time as _time
+
+    store = _state.mission_store
+    if not store:
+        return
+
+    end_reason: str = summary.get("end_reason", "")
+    total_ms: float = float(summary.get("total_duration_ms") or 0)
+    completed: int = summary.get("completed", 0)
+    failed: int = summary.get("failed", 0)
+
+    if end_reason == "mission_goal_met":
+        outcome = "success"
+    elif failed > 0:
+        outcome = "partial_failure" if completed > 0 else "failed"
+    else:
+        outcome = "completed"
+
+    now = _time.time()
+    try:
+        store.update_mission(
+            task_id,
+            status="completed",
+            outcome=outcome,
+            completed_at=now,
+            duration_ms=total_ms,
+            summary_json=_json.dumps(summary),
+        )
+    except Exception:
+        logger.exception("[MissionStore] update_mission failed for task_id=%s", task_id)
+
+    # Per-entity performance — aggregate tasks by entity_id
+    tasks: list[dict] = summary.get("tasks", [])
+    by_entity: dict[str, list[dict]] = {}
+    for t in tasks:
+        eid = t.get("entity") or ""
+        if eid:
+            by_entity.setdefault(eid, []).append(t)
+
+    for eid, entity_tasks in by_entity.items():
+        ent_completed = sum(1 for t in entity_tasks if t.get("status") == "completed")
+        ent_failed = sum(1 for t in entity_tasks if t.get("status") == "failed")
+        ent_total = len(entity_tasks)
+        ent_duration = float(sum(t.get("elapsed_ms") or 0 for t in entity_tasks))
+        ent_interventions = sum(t.get("human_intervention_count") or 0 for t in entity_tasks)
+        ent_intervention_ms = float(sum(t.get("human_intervention_ms") or 0 for t in entity_tasks))
+
+        ent_outcome = (
+            "success" if ent_failed == 0 and ent_completed > 0
+            else "partial_failure" if ent_completed > 0
+            else "failed"
+        )
+        completion_rate = ent_completed / ent_total if ent_total else 0.0
+        human_response_time = (ent_intervention_ms / ent_interventions) if ent_interventions > 0 else None
+
+        # Best-effort entity_type from profile or registry
+        entity_type = ""
+        if _state.mission_store:
+            profile = None
+            try:
+                profile = store.get_entity_profile(eid)
+            except Exception:
+                pass
+            if profile:
+                entity_type = profile.entity_type
+
+        from app.schemas.mission import EntityPerformanceRecord
+        perf = EntityPerformanceRecord(
+            mission_id=task_id,
+            entity_id=eid,
+            entity_type=entity_type,
+            task_name=", ".join(t.get("intent") or "" for t in entity_tasks if t.get("intent")),
+            outcome=ent_outcome,
+            duration_ms=ent_duration,
+            completion_rate=completion_rate,
+            safety_score=1.0,
+            intervention_count=ent_interventions,
+            human_response_time_ms=human_response_time,
+        )
+        try:
+            store.save_performance(perf)
+        except Exception:
+            logger.exception("[MissionStore] save_performance failed for entity=%s mission=%s", eid, task_id)
+
+    logger.info(
+        "[MissionStore] mission concluded: task_id=%s outcome=%s duration=%.0fms entities=%d",
+        task_id, outcome, total_ms, len(by_entity),
+    )
 
 
 # ── CLI entrypoint ─────────────────────────────────────────────────────────────

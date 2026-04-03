@@ -57,11 +57,15 @@ class EntityWorker(py_trees.behaviour.Behaviour):
         entity_id: str,
         human_supervisor_id: str = "operator-01",
         human_fallback_timeout_sec: float = _HUMAN_FALLBACK_TIMEOUT_SEC,
+        work_stealing_enabled: bool = True,
     ):
         super().__init__(name=name)
         self.entity_id = entity_id
         self.human_supervisor_id = human_supervisor_id
         self._fallback_timeout = human_fallback_timeout_sec
+        # Work stealing: when idle, claim pending tasks originally assigned to other entities.
+        # Set to False to disable (e.g. in scenarios where strict assignment is required).
+        self.work_stealing_enabled = work_stealing_enabled
 
         self._command_resolver = None
         self._zenoh = None
@@ -458,11 +462,156 @@ class EntityWorker(py_trees.behaviour.Behaviour):
                 eligible.append(task)
 
         if not eligible:
-            return None
+            return self._try_steal_task()
 
         # Return highest-priority task; preserve queue order as tiebreaker
         eligible.sort(key=lambda t: _priority_order.get(t.get("priority", "normal"), 2))
         return eligible[0]
+
+    def _try_steal_task(self) -> dict | None:
+        """Work stealing: claim a pending task originally assigned to another entity.
+
+        Conditions for stealing task T from entity B:
+          1. ``work_stealing_enabled`` is True
+          2. T.status == "pending" and T.entity != self.entity_id
+          3. T.intent is in this entity's capabilities
+          4. T's depends_on dependencies are all in a terminal state
+          5. T's preconditions are satisfied
+
+        Selection: highest-priority task first; proximity (entity → task target)
+        used as tiebreaker so the nearest idle entity wins.
+
+        Side effects:
+          - Updates T.entity to self.entity_id and T.stolen_from to original entity
+          - Writes the modified task_queue back to the Blackboard
+          - Publishes a ``zho/bt/work_stealing`` Zenoh event for IDE visualisation
+        """
+        if not self.work_stealing_enabled:
+            return None
+
+        # Resolve this entity's capabilities from CommandResolver
+        my_caps: set[str] = set()
+        if self._command_resolver:
+            caps_map = getattr(self._command_resolver, "_capabilities", {})
+            raw = caps_map.get(self.entity_id, [])
+            my_caps = set(raw) if raw else set()
+        if not my_caps:
+            return None  # No capability info — cannot safely assess stealability
+
+        # Always read fresh queue so we see any status updates from earlier workers
+        # in the same tick (e.g. tasks already claimed by a sibling EntityWorker).
+        try:
+            queue: list[dict] = self._bb.task_queue
+        except Exception:
+            return None
+
+        _priority_order = {"critical": 0, "urgent": 1, "normal": 2}
+        stealable: list[dict] = []
+
+        for task in queue:
+            if task.get("entity") == self.entity_id:
+                continue  # own task
+            if task.get("status") != "pending":
+                continue  # only steal tasks that haven't started
+            intent = task.get("intent", "")
+            if not intent or intent not in my_caps:
+                continue  # missing or unsupported capability
+            deps: list[str] = task.get("depends_on") or []
+            if not all(
+                (_find_task(queue, dep_id) or {}).get("status") in ("completed", "skipped", "failed")
+                for dep_id in deps
+            ):
+                continue  # unresolved dependencies
+            if not self._check_preconditions(task):
+                continue
+            stealable.append(task)
+
+        if not stealable:
+            return None
+
+        # Best candidate: highest priority first, then closest entity–task distance
+        stealable.sort(
+            key=lambda t: (
+                _priority_order.get(t.get("priority", "normal"), 2),
+                -self._estimate_proximity_to_task(t),
+            )
+        )
+        best = stealable[0]
+        original_entity = best.get("entity", "unknown")
+
+        # Atomically claim the task: update entity + mark provenance
+        best["entity"] = self.entity_id
+        if "stolen_from" not in best:
+            best["stolen_from"] = original_entity
+        try:
+            self._bb.task_queue = queue
+        except Exception as exc:
+            logger.warning(
+                "[EntityWorker:%s] work stealing: BB write failed, rolling back: %s",
+                self.entity_id, exc,
+            )
+            best["entity"] = original_entity
+            return None
+
+        logger.info(
+            "[EntityWorker:%s] work stealing — task=%s intent=%s stolen_from=%s",
+            self.entity_id, best.get("id"), best.get("intent"), original_entity,
+        )
+
+        if self._zenoh:
+            try:
+                import time as _time
+                self._zenoh.publish("zho/bt/work_stealing", {
+                    "entity_id": self.entity_id,
+                    "task_id": best.get("id"),
+                    "stolen_from": original_entity,
+                    "intent": best.get("intent"),
+                    "timestamp_ms": int(_time.time() * 1000),
+                })
+            except Exception:
+                pass
+
+        self._record_transition(
+            "idle", "idle", "work_stealing",
+            task_id=best.get("id"), stolen_from=original_entity,
+        )
+        return best
+
+    def _estimate_proximity_to_task(self, task: dict) -> float:
+        """Return a [0, 1] proximity score between this entity and the task target.
+
+        Uses entity position from the Blackboard (``entities/<id>/position``)
+        and the task's ``params.target_position`` or top-level ``target_position``.
+        Returns 0.5 when positional data is unavailable (neutral score).
+        Distance is normalised over 10 km (same scale as utility._proximity_score).
+        """
+        try:
+            import math
+            storage = py_trees.blackboard.Blackboard.storage
+            epos_raw = (
+                storage.get(f"/entities/{self.entity_id}/position")
+                or storage.get(f"entities/{self.entity_id}/position")
+            )
+            params = task.get("params") or {}
+            tpos_raw = params.get("target_position") or task.get("target_position")
+            if not epos_raw or not tpos_raw:
+                return 0.5
+
+            def _to_xy(pos) -> list[float] | None:
+                if isinstance(pos, (list, tuple)):
+                    return [float(v) for v in list(pos)[:2]]
+                if isinstance(pos, dict):
+                    return [float(pos.get("x", 0)), float(pos.get("y", 0))]
+                return None
+
+            epos = _to_xy(epos_raw)
+            tpos = _to_xy(tpos_raw)
+            if epos is None or tpos is None:
+                return 0.5
+            dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(epos, tpos)))
+            return max(1.0 - dist / 10000.0, 0.0)
+        except Exception:
+            return 0.5
 
     # ── Generic precondition / effect evaluation ─────────────────────────────
 

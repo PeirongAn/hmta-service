@@ -54,6 +54,7 @@ class ExecutionEngine:
         self._profiler_pub: ProfilerPublisher | None = None
         self._performance_collector = None
         self._reallocation_callback = None
+        self._mission_summary_callback = None
         self._feedback_pipeline = None
         self._oracle_service = None
         self._consecutive_failures: dict[str, int] = {}
@@ -343,6 +344,10 @@ class ExecutionEngine:
     def set_reallocation_callback(self, callback) -> None:
         """Inject a callback for dynamic reallocation triggers (Sprint 2)."""
         self._reallocation_callback = callback
+
+    def set_mission_summary_callback(self, callback) -> None:
+        """Inject a callback invoked with (task_id, summary_dict) at mission conclusion."""
+        self._mission_summary_callback = callback
 
     def set_feedback_pipeline(self, pipeline) -> None:
         """Inject the compiled FeedbackPipeline LangGraph (Sprint 3)."""
@@ -712,6 +717,7 @@ class ExecutionEngine:
         ]
 
         summary = {
+            "task_id": self._task_id,
             "mission_started_at": mission_started,
             "planning_duration_ms": planning_ms,
             "execution_duration_ms": execution_ms,
@@ -743,6 +749,12 @@ class ExecutionEngine:
                 logger.debug(
                     "[ExecutionEngine] oracle judge_task_outcome failed", exc_info=True
                 )
+
+        if self._mission_summary_callback is not None:
+            try:
+                self._mission_summary_callback(self._task_id, summary)
+            except Exception:
+                logger.debug("[ExecutionEngine] mission_summary_callback raised", exc_info=True)
 
         self._zenoh.publish("zho/bt/mission_summary", summary)
         logger.info(
@@ -904,12 +916,46 @@ class ExecutionEngine:
             storage["task_queue"] = queue
 
     def _find_replacement_entity(self, offline_id: str, task: dict) -> str | None:
-        """Find another online entity with the required capability for *task*."""
+        """Find the best available replacement for *offline_id* to handle *task*.
+
+        Scores each capability-matched candidate with ``compute_robot_utility``
+        (proximity, energy, availability, mode preference) and applies a small
+        load penalty (-5 % per pending task) so idle entities are preferred over
+        already-busy ones.  Returns the highest-scoring candidate, or None.
+        """
         intent = task.get("intent", "")
         if not self._command_resolver:
             return None
+
         caps_map = getattr(self._command_resolver, "_capabilities", {})
         schema_map = getattr(self._command_resolver, "_schema", {})
+
+        # Tally pending tasks per entity for load-aware scoring
+        try:
+            storage = py_trees.blackboard.Blackboard.storage
+            queue: list[dict] = storage.get("/task_queue") or storage.get("task_queue") or []
+        except Exception:
+            queue = []
+        pending_counts: dict[str, int] = {}
+        for t in queue:
+            eid = t.get("entity", "")
+            if t.get("status") == "pending" and eid:
+                pending_counts[eid] = pending_counts.get(eid, 0) + 1
+
+        from app.capability.hypergraph import HNode, HyperGraph
+        from app.capability.utility import compute_robot_utility
+
+        graph = HyperGraph()
+        task_node = HNode(
+            id=task.get("id", "task"),
+            kind="task",
+            attrs={"target_position": self._extract_task_position(task)},
+        )
+        graph.add_node(task_node)
+
+        best_id: str | None = None
+        best_score: float = -999.0
+
         for eid, caps in caps_map.items():
             if eid == offline_id:
                 continue
@@ -918,8 +964,64 @@ class ExecutionEngine:
                 continue
             if schema.get("comm_status") in ("offline", "comm_lost"):
                 continue
-            if intent and intent in caps:
-                return eid
+            if intent and intent not in caps:
+                continue
+
+            # Build a minimal HNode: battery normalised to 0-100 for utility scorer
+            raw_battery = schema.get("battery", 1.0)
+            battery_pct = (raw_battery * 100.0) if raw_battery <= 1.0 else float(raw_battery)
+            entity_node = HNode(
+                id=eid,
+                kind="entity",
+                attrs={
+                    "battery": min(battery_pct, 100.0),
+                    "status": schema.get("status", "idle"),
+                    "mode": schema.get("mode", "autonomous"),
+                    "risk": 0.0,
+                    "position": self._normalise_position(schema.get("position")),
+                },
+            )
+            score = compute_robot_utility(entity_node, task_node, graph).total
+            # Load penalty: deprioritise entities that are already carrying pending tasks
+            score -= 0.05 * pending_counts.get(eid, 0)
+
+            logger.debug(
+                "[ExecutionEngine] replacement candidate %s: utility_score=%.3f load=%d final=%.3f",
+                eid, score + 0.05 * pending_counts.get(eid, 0),
+                pending_counts.get(eid, 0), score,
+            )
+            if score > best_score:
+                best_score = score
+                best_id = eid
+
+        if best_id:
+            logger.info(
+                "[ExecutionEngine] best replacement for offline=%s → %s (score=%.3f)",
+                offline_id, best_id, best_score,
+            )
+        else:
+            logger.warning(
+                "[ExecutionEngine] no replacement found for offline entity %s", offline_id,
+            )
+        return best_id
+
+    @staticmethod
+    def _extract_task_position(task: dict) -> list[float] | None:
+        """Extract target position from a task dict as a [x, y] or [x, y, z] list."""
+        params = task.get("params") or {}
+        pos = params.get("target_position") or task.get("target_position")
+        return ExecutionEngine._normalise_position(pos)
+
+    @staticmethod
+    def _normalise_position(pos) -> list[float] | None:
+        """Coerce a position value to a flat float list, or None if not parseable."""
+        if isinstance(pos, (list, tuple)):
+            return [float(v) for v in pos]
+        if isinstance(pos, dict):
+            result = [float(pos.get("x", 0.0)), float(pos.get("y", 0.0))]
+            if "z" in pos:
+                result.append(float(pos["z"]))
+            return result
         return None
 
     # ── Dependency injection ───────────────────────────────────────────────────

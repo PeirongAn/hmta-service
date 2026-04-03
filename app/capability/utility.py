@@ -7,12 +7,15 @@ changes.  A Bayesian update entry-point is reserved for Phase C.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 from app.capability.hypergraph import HNode, HyperGraph
 
